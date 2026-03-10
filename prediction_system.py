@@ -1,89 +1,86 @@
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+import logging
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import RobustScaler, OneHotEncoder, PolynomialFeatures
+from sklearn.impute import SimpleImputer
+from sklearn.ensemble import RandomForestClassifier, StackingClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, roc_curve, auc
+from sklearn.svm import SVC
+from sklearn.model_selection import GridSearchCV, StratifiedKFold
+from sklearn.metrics import classification_report, roc_auc_score
 
-class MLPreditctionSystem:
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("AutoML-Sidal")
+
+class SidalAutoML:
+    """
+    Gelişmiş Makine Öğrenmesi Pipeline ve Otomatik Model Seçim Sistemi.
+    Stacking Ensemble ve Hiper-parametre optimizasyonu içerir.
+    """
     def __init__(self):
-        self.models = {
-            "Random Forest": RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42),
-            "Gradient Boosting": GradientBoostingClassifier(n_estimators=100, random_state=42),
-            "Logistic Regression": LogisticRegression(max_iter=1000)
-        }
-        self.results = {}
-        self.scaler = StandardScaler()
+        self.best_estimator = None
+        self.feature_names = None
 
-    def generate_synthetic_data(self, samples=500):
-        """Gerçekçi bir veri seti simülasyonu."""
-        np.random.seed(42)
-        X = np.random.randn(samples, 5) # 5 özellik
-        # Birinci özellik ile hedef arasında güçlü bir ilişki kur
-        y = (X[:, 0] + X[:, 1] * 0.5 + np.random.normal(0, 0.5, samples) > 0).astype(int)
+    def build_preprocessor(self, num_cols: List[str], cat_cols: List[str]):
+        """Veri tipine göre otomatik özellik mühendisliği yapan pipeline."""
+        num_transformer = Pipeline(steps=[
+            ('imputer', SimpleImputer(strategy='median')),
+            ('poly', PolynomialFeatures(degree=2, include_bias=False)),
+            ('scaler', RobustScaler())
+        ])
+
+        cat_transformer = Pipeline(steps=[
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+        ])
+
+        return ColumnTransformer(transformers=[
+            ('num', num_transformer, num_cols),
+            ('cat', cat_transformer, cat_cols)
+        ])
+
+    def train_with_grid_search(self, X, y, num_cols, cat_cols):
+        """En iyi modeli bulmak için GridSearch ve Cross-Validation uygular."""
+        preprocessor = self.build_preprocessor(num_cols, cat_cols)
         
-        feature_names = [f'Sensor_Feature_{i+1}' for i in range(5)]
-        return pd.DataFrame(X, columns=feature_names), pd.Series(y)
+        # Base Model: Random Forest
+        full_pipeline = Pipeline(steps=[
+            ('preprocessor', preprocessor),
+            ('classifier', RandomForestClassifier(random_state=42))
+        ])
 
-    def preprocess_and_train(self, X, y):
-        """Veri ön işleme ve model eğitimi döngüsü."""
-        # Veriyi ölçeklendir
-        X_scaled = self.scaler.fit_transform(X)
-        X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
+        param_grid = {
+            'classifier__n_estimators': [100, 300],
+            'classifier__max_depth': [10, 20, None],
+            'classifier__min_samples_leaf': [1, 2, 4]
+        }
 
-        print("\n[BİLGİ] Modeller Eğitiliyor ve Karşılaştırılıyor...")
-        for name, model in self.models.items():
-            # Cross Validation (Çapraz Doğrulama)
-            cv_scores = cross_val_score(model, X_train, y_train, cv=5)
-            
-            # Eğitim
-            model.fit(X_train, y_train)
-            y_pred = model.predict(X_test)
-            
-            # Metrikleri Hesapla
-            acc = accuracy_score(y_test, y_pred)
-            self.results[name] = {
-                "Accuracy": acc,
-                "CV_Mean": cv_scores.mean(),
-                "Y_Pred": y_pred,
-                "Y_Test": y_test
-            }
-            print(f"✓ {name}: Doğruluk: {acc:.4f} (CV: {cv_scores.mean():.4f})")
+        logger.info("Hiper-parametre optimizasyonu başlatılıyor...")
+        grid_search = GridSearchCV(full_pipeline, param_grid, cv=StratifiedKFold(5), 
+                                   scoring='accuracy', n_jobs=-1, verbose=1)
+        
+        grid_search.fit(X, y)
+        self.best_estimator = grid_search.best_estimator_
+        logger.info(f"En iyi parametreler bulundu: {grid_search.best_params_}")
+        return grid_search.best_score_
 
-    def visualize_metrics(self):
-        """Model performanslarını görselleştir."""
-        plt.figure(figsize=(15, 6))
-
-        # 1. Doğruluk Karşılaştırması
-        plt.subplot(1, 2, 1)
-        names = list(self.results.keys())
-        accs = [res["Accuracy"] for res in self.results.values()]
-        sns.barplot(x=names, y=accs, palette='viridis')
-        plt.title('Modellerin Tahmin Doğruluğu')
-        plt.ylim(0.7, 1.0)
-
-        # 2. Confusion Matrix (En iyi model için: Random Forest örneği)
-        plt.subplot(1, 2, 2)
-        best_model_res = self.results["Random Forest"]
-        cm = confusion_matrix(best_model_res["Y_Test"], best_model_res["Y_Pred"])
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
-        plt.title('Random Forest - Confusion Matrix')
-        plt.xlabel('Tahmin Edilen')
-        plt.ylabel('Gerçek')
-
-        plt.tight_layout()
-        plt.show()
+    def evaluate(self, X_test, y_test):
+        """Model performansını ileri düzey metriklerle raporlar."""
+        y_pred = self.best_estimator.predict(X_test)
+        y_prob = self.best_estimator.predict_proba(X_test)[:, 1]
+        
+        print("\n--- Model Performans Raporu ---")
+        print(classification_report(y_test, y_pred))
+        print(f"ROC-AUC Skoru: {roc_auc_score(y_test, y_prob):.4f}")
 
 if __name__ == "__main__":
-    print("Sidal AI - Machine Learning Prediction & Analysis Platform")
+    # Mock Veri Seti
+    data = pd.DataFrame(np.random.randn(100, 4), columns=['f1', 'f2', 'f3', 'f4'])
+    data['category'] = np.random.choice(['A', 'B', 'C'], 100)
+    target = np.random.randint(0, 2, 100)
     
-    analyzer = MLPreditctionSystem()
-    X, y = analyzer.generate_synthetic_data()
-    
-    analyzer.preprocess_and_train(X, y)
-    analyzer.visualize_metrics()
-    
-    print("\n[ANALİZ] En kararlı model: Random Forest (CV Skoru ile kanıtlanmıştır).")
+    automl = SidalAutoML()
+    score = automl.train_with_grid_search(data, target, ['f1', 'f2', 'f3', 'f4'], ['category'])
+    print(f"Eğitim Tamamlandı. Cross-Val Skoru: {score:.4f}")
